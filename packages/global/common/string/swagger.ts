@@ -7,7 +7,32 @@ const EXTERNAL_REF_ERROR_MESSAGE = 'Unable to resolve $ref pointer: external $re
 const SUPPORTED_OPENAPI_HTTP_METHODS = new Set(['get', 'post', 'put', 'delete', 'patch']);
 
 /**
- * YAML 文档的标量类型规则：布尔值按 YAML 语义解析，其余标量保持文本。
+ * 未加引号的 YAML 布尔标量。
+ *
+ * js-yaml 的隐式类型规则不区分映射键和值，而映射键必须保持原文：
+ * 组件名、响应码等键区分大小写，`TRUE` 被改写成 `true` 后文档内 `$ref` 会解析失败。
+ * 因此解析阶段先保留原始拼写（js-yaml 用 `String(key)` 生成映射键），
+ * 再由 `unboxYamlBooleans` 只把值位置换成布尔值。
+ */
+class YamlBooleanScalar {
+  constructor(private readonly source: string) {}
+
+  // js-yaml 只对带 toStringTag 的对象调用自定义 toString，否则键会变成 "[object Object]"。
+  get [Symbol.toStringTag]() {
+    return 'YamlBooleanScalar';
+  }
+
+  get value() {
+    return this.source.toLowerCase() === 'true';
+  }
+
+  toString() {
+    return this.source;
+  }
+}
+
+/**
+ * YAML 文档的标量类型规则：值位置的布尔值按 YAML 语义解析，其余标量保持文本。
  *
  * `deprecated`、`required`、`nullable` 等字段在下游按布尔值判断，文本 "false" 会被当成真值。
  * 数字与 null 不做类型转换：未加引号的 `swagger: 2.0`、`version: 1.0` 转成数字后会被 swagger-parser 拒绝，
@@ -19,10 +44,30 @@ const OPENAPI_YAML_SCHEMA = yaml.FAILSAFE_SCHEMA.extend({
       kind: 'scalar',
       resolve: (data: unknown) =>
         typeof data === 'string' && /^(?:true|True|TRUE|false|False|FALSE)$/.test(data),
-      construct: (data: string) => data.toLowerCase() === 'true'
+      construct: (data: string) => new YamlBooleanScalar(data)
     })
   ]
 });
+
+/** 把 YAML 解析结果中值位置的 `YamlBooleanScalar` 换成布尔值，映射键不受影响。 */
+const unboxYamlBooleans = (root: unknown): unknown => {
+  // 锚点别名会让同一个容器出现多次，甚至自引用。
+  const visited = new WeakSet<object>();
+
+  const unbox = (node: unknown): unknown => {
+    if (node instanceof YamlBooleanScalar) return node.value;
+    if (typeof node !== 'object' || node === null || visited.has(node)) return node;
+    visited.add(node);
+
+    const container = node as Record<string, unknown>;
+    for (const key of Object.keys(container)) {
+      container[key] = unbox(container[key]);
+    }
+    return node;
+  };
+
+  return unbox(root);
+};
 
 const isPlainObject = (value: unknown): value is Record<string, any> =>
   typeof value === 'object' && value !== null && !Array.isArray(value);
@@ -181,7 +226,7 @@ export const parseOpenAPISchemaString = (schemaText: string): Record<string, any
       return JSON.parse(schemaText);
     } catch {
       try {
-        return yaml.load(schemaText, { schema: OPENAPI_YAML_SCHEMA });
+        return unboxYamlBooleans(yaml.load(schemaText, { schema: OPENAPI_YAML_SCHEMA }));
       } catch (error) {
         throw new UserConfigError(
           getErrorMessage(error, INVALID_OPENAPI_SCHEMA_MESSAGE),

@@ -2259,6 +2259,44 @@ paths:
     ]);
   });
 
+  it('should resolve an internal $ref to a component named like a YAML boolean', async () => {
+    const openApiYaml = [
+      'openapi: 3.0.0',
+      'info:',
+      '  title: Test API',
+      '  version: 1.0',
+      'paths:',
+      '  /flags:',
+      '    post:',
+      '      operationId: createFlag',
+      '      requestBody:',
+      '        required: true',
+      '        content:',
+      '          application/json:',
+      '            schema:',
+      "              $ref: '#/components/schemas/TRUE'",
+      '      responses:',
+      "        '200':",
+      '          description: OK',
+      'components:',
+      '  schemas:',
+      '    TRUE:',
+      '      type: object',
+      '      properties:',
+      '        False:',
+      '          type: boolean',
+      '          nullable: true'
+    ].join('\n');
+
+    const result = await str2OpenApiSchema(openApiYaml);
+
+    expect(result.pathData.map((item) => item.name)).toEqual(['createFlag']);
+    expect(result.pathData[0].request.content['application/json'].schema).toEqual({
+      type: 'object',
+      properties: { False: { type: 'boolean', nullable: true } }
+    });
+  });
+
   it('should handle requestBody in OpenAPI 3.0', async () => {
     const openApiJson = JSON.stringify({
       openapi: '3.0.0',
@@ -2529,6 +2567,30 @@ describe('parseOpenAPISchemaString', () => {
         }
       }
     });
+  });
+
+  it('keeps YAML mapping keys as written and types only the values', () => {
+    expect(
+      parseOpenAPISchemaString(
+        [
+          'TRUE: TRUE',
+          'False:',
+          '  true: &flag false',
+          '  list: [True, *flag]',
+          '"true": "true"'
+        ].join('\n')
+      )
+    ).toEqual({
+      TRUE: true,
+      False: { true: false, list: [true, false] },
+      true: 'true'
+    });
+  });
+
+  it('rejects a YAML document that is only a boolean', () => {
+    expect(() => parseOpenAPISchemaString('true')).toThrow(
+      'Schema is not a valid OpenAPI API definition'
+    );
   });
 
   it.each([
